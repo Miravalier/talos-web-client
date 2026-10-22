@@ -5,7 +5,10 @@ import { FitAddon } from '@xterm/addon-fit';
 
 window.addEventListener("load", async () => {
   console.log("Creating Terminal");
+
   const terminal = new Terminal();
+  terminal.options.fontSize = 22;
+
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.open(document.getElementById('terminal'));
