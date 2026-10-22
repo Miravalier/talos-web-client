@@ -1,0 +1,9 @@
+services:
+  talos-web-server:
+    image: talos-web-server:latest
+    container_name: talos-web-server
+    environment:
+      - SSH_TARGET=${SSH_TARGET}
+    ports:
+      - "${HTTP_PORT}:8080"
+    restart: unless-stopped

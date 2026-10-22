@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,8 +35,8 @@ var upgrader = websocket.Upgrader{
 }
 
 type windowSize struct {
-	High  int `json:"high"`
-	Width int `json:"width"`
+	Height int `json:"height"`
+	Width  int `json:"width"`
 }
 
 type sshClient struct {
@@ -62,8 +64,6 @@ func (c *sshClient) getWindowSize() (wdSize *windowSize, err error) {
 		return
 	}
 
-	// log.Println("msg:", string(msg))
-
 	wdSize = new(windowSize)
 	if err = json.Unmarshal(msg, wdSize); err != nil {
 		err = fmt.Errorf("json.Unmarshal: %w", err)
@@ -77,19 +77,19 @@ func (c *sshClient) wsWrite() error {
 		c.closeSig <- struct{}{}
 	}()
 
-	data := make([]byte, maxMessageSize, maxMessageSize)
+	data := make([]byte, maxMessageSize)
 
 	for {
 		time.Sleep(10 * time.Millisecond)
 		n, readErr := c.sessOut.Read(data)
-		if n > 0 {
-			c.conn.SetWriteDeadline(time.Now().Add(messageWait))
-			if err := c.conn.WriteMessage(websocket.TextMessage, data[:n]); err != nil {
-				return fmt.Errorf("conn.WriteMessage: %w", err)
-			}
-		}
 		if readErr != nil {
 			return fmt.Errorf("sessOut.Read: %w", readErr)
+		}
+		if n > 0 {
+			c.conn.SetWriteDeadline(time.Now().Add(messageWait))
+			if err := c.conn.WriteMessage(websocket.BinaryMessage, data[:n]); err != nil {
+				return fmt.Errorf("conn.WriteMessage: %w", err)
+			}
 		}
 	}
 }
@@ -107,6 +107,7 @@ func (c *sshClient) wsRead() error {
 		if err != nil {
 			return fmt.Errorf("conn.NextReader: %w", err)
 		}
+
 		if msgType != websocket.BinaryMessage {
 			if _, err := io.Copy(c.sessIn, connReader); err != nil {
 				return fmt.Errorf("io.Copy: %w", err)
@@ -114,13 +115,11 @@ func (c *sshClient) wsRead() error {
 			continue
 		}
 
-		data := make([]byte, maxMessageSize, maxMessageSize)
+		data := make([]byte, maxMessageSize)
 		n, err := connReader.Read(data)
 		if err != nil {
 			return fmt.Errorf("connReader.Read: %w", err)
 		}
-
-		// log.Println("data:", string(data))
 
 		var wdSize windowSize
 		if err := json.Unmarshal(data[:n], &wdSize); err != nil {
@@ -129,7 +128,7 @@ func (c *sshClient) wsRead() error {
 
 		// log.Println("wdSize:", wdSize)
 
-		if err := c.sess.WindowChange(wdSize.High, wdSize.Width); err != nil {
+		if err := c.sess.WindowChange(wdSize.Height, wdSize.Width); err != nil {
 			return fmt.Errorf("sess.WindowChange: %w", err)
 		}
 	}
@@ -144,24 +143,17 @@ func (c *sshClient) bridgeWSAndSSH() {
 		return
 	}
 
-	// log.Println("wdSize:", wdSize)
-
-	var auth ssh.AuthMethod
-	if c.secret != "" {
-		auth = ssh.Password(c.secret)
-	} else {
-		key, err := os.ReadFile(c.keyfile)
-		if err != nil {
-			log.Println("bridgeWSAndSSH: os.ReadFile:", err)
-			return
-		}
-		privateKey, err := ssh.ParsePrivateKey(key)
-		if err != nil {
-			log.Println("bridgeWSAndSSH: ssh.ParsePrivateKey:", err)
-			return
-		}
-		auth = ssh.PublicKeys(privateKey)
+	key, err := os.ReadFile(c.keyfile)
+	if err != nil {
+		log.Println("bridgeWSAndSSH: os.ReadFile:", err)
+		return
 	}
+	privateKey, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		log.Println("bridgeWSAndSSH: ssh.ParsePrivateKey:", err)
+		return
+	}
+	auth := ssh.PublicKeys(privateKey)
 
 	config := &ssh.ClientConfig{
 		User: c.user,
@@ -172,6 +164,7 @@ func (c *sshClient) bridgeWSAndSSH() {
 		// It should not be used for production code.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
+
 	c.client, err = ssh.Dial("tcp", c.addr, config)
 	if err != nil {
 		log.Println("bridgeWSAndSSH: ssh.Dial:", err)
@@ -186,7 +179,7 @@ func (c *sshClient) bridgeWSAndSSH() {
 	}
 	defer c.sess.Close()
 
-	c.sess.Stderr = os.Stderr // TODO: check proper Stderr output
+	c.sess.Stderr = io.Discard
 	c.sessOut, err = c.sess.StdoutPipe()
 	if err != nil {
 		log.Println("bridgeWSAndSSH: session.StdoutPipe:", err)
@@ -200,7 +193,7 @@ func (c *sshClient) bridgeWSAndSSH() {
 	}
 	defer c.sessIn.Close()
 
-	if err := c.sess.RequestPty("xterm", wdSize.High, wdSize.Width, terminalModes); err != nil {
+	if err := c.sess.RequestPty("xterm", wdSize.Height, wdSize.Width, terminalModes); err != nil {
 		log.Println("bridgeWSAndSSH: session.RequestPty:", err)
 		return
 	}
@@ -229,13 +222,16 @@ func (c *sshClient) bridgeWSAndSSH() {
 
 type sshHandler struct {
 	addr    string
-	user    string
 	secret  string
 	keyfile string
 }
 
 // webSocket handles WebSocket requests for SSH from the clients.
 func (h *sshHandler) webSocket(w http.ResponseWriter, req *http.Request) {
+	queryId := req.URL.Query().Get("id")
+	digest := sha256.Sum256([]byte(queryId))
+	userId := base64.StdEncoding.EncodeToString(digest[:])[:16]
+
 	conn, err := upgrader.Upgrade(w, req, nil)
 	if err != nil {
 		log.Println("upgrader.Upgrade:", err)
@@ -245,7 +241,7 @@ func (h *sshHandler) webSocket(w http.ResponseWriter, req *http.Request) {
 	sshCli := &sshClient{
 		conn:     conn,
 		addr:     h.addr,
-		user:     h.user,
+		user:     userId,
 		secret:   h.secret,
 		keyfile:  h.keyfile,
 		closeSig: make(chan struct{}, 1),

@@ -1,6 +1,7 @@
 MIT License
 
-Copyright (c) 2022 Chia-Chi Hsu
+Forked code from https://github.com/wuchihsu/go-ssh-web-client Copyright 2022 Chia-Chi Hsu
+All other code Copyright 2026 Miravalier
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
